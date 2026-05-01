@@ -1,0 +1,33 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# Env
+.env
+.env.local
+.env.*.local
+
+# Credentials — never commit key files
+*.key
+service-account*.json
+*-credentials.json
+*-key.json
+
+# Runtime artifacts
+skills/learned/
+/tmp/
+*.log
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+*.swp
