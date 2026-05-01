@@ -1,0 +1,231 @@
+"""CDAgent — A2A server entrypoint (Starlette + uvicorn via to_a2a).
+
+Entry points:
+  POST /          — A2A JSON-RPC (handled by ADK to_a2a)
+  POST /slack     — Slack slash command from a human
+  POST /chat      — Google Chat webhook from a human
+
+  GET  /.well-known/agent.json  — A2A Agent Card (handled by to_a2a)
+  GET  /health                  — Cloud Run health check
+"""
+
+import asyncio
+import json
+import logging
+import os
+import threading
+import uuid
+
+import requests
+import uvicorn
+from dotenv import load_dotenv
+load_dotenv()
+
+from starlette.middleware.base import BaseHTTPMiddleware
+from starlette.requests import Request
+from starlette.responses import JSONResponse, Response
+
+from google.adk.a2a.utils.agent_to_a2a import to_a2a
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
+from google.genai import types
+
+from agent import build_agent, set_correlation_id
+from utils import emit_event, resolve_secret
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+log = logging.getLogger(__name__)
+
+HOST = os.environ.get("HOST", "localhost")
+PORT = int(os.environ.get("PORT", 8080))
+PROTOCOL = os.environ.get("PROTOCOL", "http")
+APP_NAME = "cd_pipeline"
+_USER_ID = "caller"
+
+_SLACK_WEBHOOK_URL: str = ""
+
+
+def _resolve_slack_webhook() -> None:
+    global _SLACK_WEBHOOK_URL
+    val = resolve_secret("SLACK_WEBHOOK_URL", "SLACK_WEBHOOK_SECRET")
+    if val:
+        _SLACK_WEBHOOK_URL = val
+    else:
+        log.warning("SLACK_WEBHOOK_URL and SLACK_WEBHOOK_SECRET both unset — Slack post-back disabled")
+
+
+def _post_to_slack(text: str) -> None:
+    if not _SLACK_WEBHOOK_URL:
+        return
+    try:
+        requests.post(_SLACK_WEBHOOK_URL, json={"text": text}, timeout=10)
+    except Exception as e:
+        log.warning("Slack post-back failed: %s", e)
+
+
+# ── Shared agent + session service (persistent across Slack/Chat messages) ────
+
+_agent = build_agent()
+_session_service = InMemorySessionService()
+_runner = Runner(agent=_agent, app_name=APP_NAME, session_service=_session_service)
+
+
+async def _get_or_create_session(session_id: str) -> None:
+    existing = await _session_service.get_session(
+        app_name=APP_NAME, user_id=_USER_ID, session_id=session_id
+    )
+    if existing is None:
+        await _session_service.create_session(
+            app_name=APP_NAME, user_id=_USER_ID, session_id=session_id
+        )
+        log.info("New session created | session_id=%s", session_id)
+    else:
+        log.info("Resuming existing session | session_id=%s turns=%s",
+                 session_id, len(existing.events))
+
+
+# ── Agent runner (Slack/Chat routes use this directly) ────────────────────────
+
+async def _run_agent(task_id: str, message: str, correlation_id: str) -> str:
+    set_correlation_id(correlation_id)
+    await _get_or_create_session(task_id)
+    final_response = ""
+    async for event in _runner.run_async(
+        user_id=_USER_ID,
+        session_id=task_id,
+        new_message=types.Content(role="user", parts=[types.Part(text=message)]),
+    ):
+        if event.is_final_response() and event.content and event.content.parts:
+            final_response = event.content.parts[0].text
+    emit_event("CDAgent", "thinking", {"summary": final_response[:300]}, correlation_id)
+    return final_response
+
+
+def _run_and_reply(task_id: str, message: str, correlation_id: str, reply_fn) -> None:
+    try:
+        result = asyncio.run(_run_agent(task_id, message, correlation_id))
+        reply_fn(result)
+    except Exception as e:
+        log.exception("Background agent run failed for task %s", task_id)
+        reply_fn(f"CD run failed: {e}")
+
+
+# ── Middleware: extract A2A contextId so tool emit_events carry correlation ID ─
+
+class _A2ACorrelationMiddleware(BaseHTTPMiddleware):
+    async def dispatch(self, request: Request, call_next):
+        if request.method == "POST" and request.url.path == "/":
+            try:
+                body = await request.body()
+                data = json.loads(body)
+                msg = data.get("params", {}).get("message", {})
+                parts = msg.get("parts", [])
+                text = " ".join(p.get("text", "") for p in parts if p.get("text"))
+                cid = msg.get("contextId") or str(data.get("id") or "")
+                if cid:
+                    set_correlation_id(cid)
+                log.info("A2A message received | cid=%s | text=%.200s", cid, text)
+            except Exception:
+                log.warning("A2A middleware: could not parse request body", exc_info=True)
+        return await call_next(request)
+
+
+# ── Slack slash command ───────────────────────────────────────────────────────
+
+async def handle_slack(request: Request) -> Response:
+    """Slack slash command. Returns immediately; posts result back via webhook."""
+    form = await request.form()
+    text = str(form.get("text", "")).strip()
+    user_name = str(form.get("user_name", "unknown"))
+    user_id = str(form.get("user_id", user_name))
+    channel_id = str(form.get("channel_id", "default"))
+
+    if not text:
+        return JSONResponse({"text": "Usage: /cd <deploy request>"})
+
+    _deploy_keywords = ("deploy", "canary", "rollback", "promote", "traffic", "revision")
+    is_deploy_run = any(kw in text.lower() for kw in _deploy_keywords)
+    if is_deploy_run:
+        task_id = f"slack-{channel_id}-{user_id}-{uuid.uuid4().hex[:8]}"
+    else:
+        task_id = f"slack-{channel_id}-{user_id}"
+
+    emit_event("CDAgent", "chat_message_received", {
+        "platform": "slack",
+        "user": user_name,
+        "message": text,
+    }, task_id)
+    log.info("Slack message from %s: %.100s", user_name, text)
+
+    threading.Thread(
+        target=_run_and_reply,
+        args=(task_id, text, task_id, _post_to_slack),
+        daemon=False,
+    ).start()
+
+    return JSONResponse({
+        "response_type": "in_channel",
+        "text": f"🚀 CDAgent on it: *{text[:100]}*",
+    })
+
+
+# ── Google Chat webhook ───────────────────────────────────────────────────────
+
+async def handle_gchat(request: Request) -> Response:
+    """Google Chat webhook. Returns immediately; posts result back via Slack webhook."""
+    try:
+        body = await request.json()
+    except Exception:
+        return Response(status_code=400)
+
+    if body.get("type") == "ADDED_TO_SPACE":
+        return JSONResponse({"text": "CDAgent ready. Send a deploy request."})
+    if body.get("type") == "REMOVED_FROM_SPACE":
+        return Response(status_code=200)
+
+    message = body.get("message", {})
+    text = message.get("text", "").strip()
+    user_name = message.get("sender", {}).get("displayName", "unknown")
+    space_name = body.get("space", {}).get("name", "")
+
+    if not text:
+        return JSONResponse({"text": "Send a deploy request, e.g. 'deploy image us-central1-docker.pkg.dev/...:sha'"})
+
+    user_id = message.get("sender", {}).get("name", user_name).replace("/", "-")
+    task_id = f"gchat-{space_name.replace('/', '-')}-{user_id}" or f"gchat-{str(uuid.uuid4())}"
+    emit_event("CDAgent", "chat_message_received", {
+        "platform": "google_chat",
+        "user": user_name,
+        "message": text,
+        "space": space_name,
+    }, task_id)
+    log.info("GChat message from %s: %.100s", user_name, text)
+
+    threading.Thread(
+        target=_run_and_reply,
+        args=(task_id, text, task_id, _post_to_slack),
+        daemon=False,
+    ).start()
+
+    return JSONResponse({"text": f"🚀 CDAgent on it: {text[:100]}"})
+
+
+# ── Health check ──────────────────────────────────────────────────────────────
+
+async def health(request: Request) -> Response:
+    return Response(status_code=200)
+
+
+# ── Build the A2A Starlette app ───────────────────────────────────────────────
+
+_resolve_slack_webhook()
+
+app = to_a2a(_agent, host=HOST, port=PORT, protocol=PROTOCOL)
+app.add_middleware(_A2ACorrelationMiddleware)
+app.add_route("/slack", handle_slack, methods=["POST"])
+app.add_route("/chat", handle_gchat, methods=["POST"])
+app.add_route("/health", health, methods=["GET"])
+
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=PORT)
