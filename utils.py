@@ -46,6 +46,9 @@ def emit_event(
         from google.cloud import pubsub_v1
         publisher = pubsub_v1.PublisherClient()
         future = publisher.publish(topic, json.dumps(event).encode())
-        future.result(timeout=10)
+        future.add_done_callback(
+            lambda f: log.warning("emit_event failed (non-fatal): %s", f.exception())
+            if f.exception() else None
+        )
     except Exception:
         log.warning("emit_event failed (non-fatal):", exc_info=True)
