@@ -47,5 +47,5 @@ def emit_event(
         publisher = pubsub_v1.PublisherClient()
         future = publisher.publish(topic, json.dumps(event).encode())
         future.result(timeout=10)
-    except Exception as e:
-        log.warning("emit_event failed (non-fatal): %s", e)
+    except Exception:
+        log.warning("emit_event failed (non-fatal):", exc_info=True)
