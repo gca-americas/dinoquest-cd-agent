@@ -22,14 +22,14 @@ An A2A message specifying what to deploy. Extract:
 
 ## Step 1 — Check if this is a new service
 
-`_get_stable_revision` returns `new_service: true` if the Cloud Run service doesn't exist yet.
+`get_stable_revision` returns `new_service: true` if the Cloud Run service doesn't exist yet.
 If `new_service` is true: skip memory lookup, skip canary ramp, go directly to Step 3 and
 deploy with `new_percent=100` (no stable revision to split with). Skip Step 4 monitoring.
 Write a pattern after promotion as normal.
 
 ## Step 2 — Check memory for a fast-lane match (Behavior A)
 
-Call `_read_patterns` with `feature_signature=feature_name`.
+Call `read_patterns` with `feature_signature=feature_name`.
 
 Examine the returned patterns. A match exists if:
 - A past pattern's `feature_signature` is similar to the current feature name
@@ -68,40 +68,43 @@ Analyze `change_description` and compute a risk score 0–10:
 
 ## Step 3 — Deploy and shift traffic
 
-1. Call `_get_stable_revision` to identify the current stable revision.
-2. Call `_deploy_revision` with `image_uri`. Record the `new_revision` name.
-3. Call `_shift_traffic` with `new_percent=<canary_pct>`, `stable_revision` from step 1.
+1. Call `get_stable_revision` to identify the current stable revision.
+2. Call `deploy_revision` with `image_uri`. Record the `new_revision` name from the response.
+3. **Already-deployed check:** If `new_revision` equals the current stable revision name, the
+   image is already running as stable — nothing to deploy. Skip Steps 4–5, report
+   **Outcome: ALREADY DEPLOYED ✅** with a note that the image is live, and stop.
+4. Call `shift_traffic` with `new_percent=<canary_pct>`, `stable_revision` from step 1.
    Pass `correlation_id` so the GUI shows the traffic shift animation.
 
 ## Step 4 — Monitor loop
 
-Call `_poll_metrics` once. The tool already samples the last 30 seconds.
+Call `poll_metrics` once. The tool already samples the last 30 seconds.
 Use the `verdict` field in the response to decide:
 
 | verdict | Action |
 |---|---|
-| `ROLLBACK` | Immediately call `_shift_traffic` to 0% new / 100% stable. Report rollback. Stop. |
-| `HOLD` | Call `_poll_metrics` one more time. If still HOLD, rollback. |
+| `ROLLBACK` | Immediately call `shift_traffic` to 0% new / 100% stable. Report rollback. Stop. |
+| `HOLD` | Call `poll_metrics` one more time. If still HOLD, rollback. |
 | `OK` | Proceed to promote. |
 
-If canary has < 5 requests, call `_poll_metrics` one more time before making a verdict.
+If canary has < 5 requests, call `poll_metrics` one more time before making a verdict.
 
 ## Step 5 — Promote or rollback
 
 **On successful window (all polls OK):**
-1. Call `_shift_traffic` with `new_percent=100`. Pass `correlation_id`.
-2. Call `_write_pattern` with:
+1. Call `shift_traffic` with `new_percent=100`. Pass `correlation_id`.
+2. Call `write_pattern` with:
    - `feature_signature`: the feature name from the request
    - `optimal_canary_percent`: the canary % you used
    - `time_to_promote_seconds`: total seconds from first traffic shift to promotion
    - `error_budget_impact`: `canary_error_rate` from the last poll (0.0 if no errors)
-3. Call `_create_release`:
+3. Call `create_release`:
    - `tag`: `v<short_sha>` (first 8 chars of commit SHA, or derive from image URI tag)
    - `name`: `<feature_name> — <service_name> promoted`
    - `body`: the full CD report (pipeline diagram + summary)
    - `commit_sha`: the commit SHA from the image tag or PR context
    - `prerelease`: False
-4. If a PR number was provided, call `_post_pr_comment` with a deployment summary:
+4. If a PR number was provided, call `post_pr_comment` with a deployment summary:
    ```
    ## Deployment Complete ✅
 
@@ -113,9 +116,9 @@ If canary has < 5 requests, call `_poll_metrics` one more time before making a v
    ```
 
 **On rollback:**
-1. Call `_shift_traffic` with `new_percent=0`, `stable_revision` from Step 3.
+1. Call `shift_traffic` with `new_percent=0`, `stable_revision` from Step 3.
 2. Do NOT write a pattern — failed deployments are not used for fast-lane matching.
-3. If a PR number was provided, call `_post_pr_comment`:
+3. If a PR number was provided, call `post_pr_comment`:
    ```
    ## Deployment Rolled Back ❌
 
@@ -172,7 +175,7 @@ DinoQuest CD Pipeline
 ---
 
 ### Summary
-- **Outcome:** PROMOTED ✅ | ROLLED BACK ❌
+- **Outcome:** PROMOTED ✅ | ROLLED BACK ❌ | ALREADY DEPLOYED ✅
 - **Canary %:** <pct>% _(fast-lane | risk score <N>/10)_
 - **Time to promote:** <N> seconds
 - **Error budget impact:** <canary_error_rate>%

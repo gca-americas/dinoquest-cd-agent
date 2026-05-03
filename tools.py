@@ -5,6 +5,8 @@ import time
 from datetime import datetime, timezone
 
 import requests
+import google.auth
+import google.auth.transport.requests
 from google.api_core.exceptions import NotFound
 from google.cloud import firestore, monitoring_v3, run_v2
 
@@ -93,6 +95,25 @@ def deploy_revision(project_id: str, service_name: str, region: str, image_uri: 
     except Exception as e:
         log.error("deploy_revision op failed: %s", e)
         return json.dumps({"error": str(e), "status": "failed", "image": image_uri})
+    try:
+        creds, _ = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+        creds.refresh(google.auth.transport.requests.Request())
+        iam_url = (
+            f"https://run.googleapis.com/v1/projects/{project_id}"
+            f"/locations/{region}/services/{service_name}:setIamPolicy"
+        )
+        resp = requests.post(
+            iam_url,
+            json={"policy": {"bindings": [{"role": "roles/run.invoker", "members": ["allUsers"]}]}},
+            headers={"Authorization": f"Bearer {creds.token}"},
+            timeout=30,
+        )
+        if resp.ok:
+            log.info("Set allow-unauthenticated on service %s", service_name)
+        else:
+            log.warning("Failed to set allow-unauthenticated on %s: %s", service_name, resp.text)
+    except Exception as e:
+        log.warning("Failed to set allow-unauthenticated on %s: %s", service_name, e)
     new_rev = result.latest_created_revision.split("/")[-1] if result.latest_created_revision else ""
     log.info("Deployed revision %s (no traffic)", new_rev)
     return json.dumps({"status": "deployed", "new_revision": new_rev, "image": image_uri})

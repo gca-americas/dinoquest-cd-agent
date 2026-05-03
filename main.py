@@ -9,6 +9,9 @@ Entry points:
   GET  /health                  — Cloud Run health check
 """
 
+import os
+os.environ.setdefault("GRPC_VERBOSITY", "ERROR")
+
 import asyncio
 import json
 import logging
@@ -97,7 +100,7 @@ async def _run_agent(task_id: str, message: str, correlation_id: str) -> str:
     ):
         if event.is_final_response() and event.content and event.content.parts:
             final_response = event.content.parts[0].text
-    emit_event("CDAgent", "thinking", {"summary": final_response[:300]}, correlation_id)
+    emit_event("CDAgent", "pipeline_step", {"step": f"CD report: {final_response[:260]}"}, correlation_id)
     return final_response
 
 
@@ -110,9 +113,12 @@ def _run_and_reply(task_id: str, message: str, correlation_id: str, reply_fn) ->
         reply_fn(f"CD run failed: {e}")
 
 
-# ── Middleware: extract A2A contextId so tool emit_events carry correlation ID ─
+# ── Middleware: handle A2A task requests asynchronously ───────────────────────
+# Intercepts POST /, starts deployment in a background thread, and returns an
+# immediate A2A "completed" acknowledgment so the caller's HTTP request finishes
+# quickly. CDAgent posts the full deploy report to Slack when done.
 
-class _A2ACorrelationMiddleware(BaseHTTPMiddleware):
+class _A2AAsyncMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         if request.method == "POST" and request.url.path == "/":
             try:
@@ -122,11 +128,39 @@ class _A2ACorrelationMiddleware(BaseHTTPMiddleware):
                 parts = msg.get("parts", [])
                 text = " ".join(p.get("text", "") for p in parts if p.get("text"))
                 cid = msg.get("contextId") or str(data.get("id") or "")
+                task_id = data.get("params", {}).get("id") or str(uuid.uuid4())
+                request_id = data.get("id")
+
                 if cid:
                     set_correlation_id(cid)
-                log.info("A2A message received | cid=%s | text=%.200s", cid, text)
+                log.info("A2A task received | task_id=%s cid=%s | text=%.200s",
+                         task_id, cid, text)
+
+                threading.Thread(
+                    target=_run_and_reply,
+                    args=(task_id, text, cid, _post_to_slack),
+                    daemon=False,
+                ).start()
+
+                ack = json.dumps({
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": {
+                        "id": task_id,
+                        "contextId": cid or task_id,
+                        "status": {"state": "completed"},
+                        "artifacts": [{
+                            "artifactId": f"{task_id}-ack",
+                            "parts": [{"kind": "text", "text": "Deploy task accepted — CDAgent processing in background. Results will be posted to Slack."}]
+                        }],
+                    },
+                })
+                return Response(content=ack, media_type="application/json", status_code=200)
+
             except Exception:
-                log.warning("A2A middleware: could not parse request body", exc_info=True)
+                log.warning("A2A async middleware failed, falling through to handler",
+                            exc_info=True)
+
         return await call_next(request)
 
 
@@ -221,7 +255,7 @@ async def health(request: Request) -> Response:
 _resolve_slack_webhook()
 
 app = to_a2a(_agent, host=HOST, port=PORT, protocol=PROTOCOL)
-app.add_middleware(_A2ACorrelationMiddleware)
+app.add_middleware(_A2AAsyncMiddleware)
 app.add_route("/slack", handle_slack, methods=["POST"])
 app.add_route("/chat", handle_gchat, methods=["POST"])
 app.add_route("/health", health, methods=["GET"])
