@@ -127,8 +127,8 @@ def build_agent() -> LlmAgent:
         """Write a successful deployment pattern to Firestore for future fast-lane matching."""
         log.info("CD [memory] write_pattern | signature=%.100s canary_pct=%s ttp=%s",
                  feature_signature, optimal_canary_percent, time_to_promote_seconds)
-        emit_event("CDAgent", "thinking",
-                   {"summary": f"Writing deployment pattern to memory"},
+        emit_event("CDAgent", "pipeline_step",
+                   {"step": "cd report: deployment pattern saved"},
                    _cid_get())
         result = write_deployment_pattern(project_id, {
             "feature_signature": feature_signature,
