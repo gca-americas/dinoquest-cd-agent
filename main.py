@@ -42,6 +42,9 @@ log = logging.getLogger(__name__)
 HOST = os.environ.get("HOST", "localhost")
 PORT = int(os.environ.get("PORT", 8080))
 PROTOCOL = os.environ.get("PROTOCOL", "http")
+# Cloud Run exposes HTTPS on 443, not 8080. Use 443 for the agent card URL when
+# running in HTTPS mode so callers don't get a :8080 suffix that's unreachable.
+_CARD_PORT = 443 if PROTOCOL == "https" else PORT
 APP_NAME = "cd_pipeline"
 _USER_ID = "caller"
 
@@ -254,7 +257,7 @@ async def health(request: Request) -> Response:
 
 _resolve_slack_webhook()
 
-app = to_a2a(_agent, host=HOST, port=PORT, protocol=PROTOCOL)
+app = to_a2a(_agent, host=HOST, port=_CARD_PORT, protocol=PROTOCOL)
 app.add_middleware(_A2AAsyncMiddleware)
 app.add_route("/slack", handle_slack, methods=["POST"])
 app.add_route("/chat", handle_gchat, methods=["POST"])
