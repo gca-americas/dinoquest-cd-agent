@@ -96,6 +96,9 @@ gcloud pubsub topics add-iam-policy-binding harness-events \
 |---|---|---|---|
 | `GOOGLE_CLOUD_PROJECT` | Yes | — | GCP project ID |
 | `GOOGLE_GENAI_USE_VERTEXAI` | Yes | — | Set to `True` |
+| `HOST` | **Yes (prod)** | `localhost` | Public hostname of this service — used to build the A2A agent card `url` field. Must be set to the Cloud Run hostname (e.g. `cd-agent-xxx-uc.a.run.app`) or callers will POST to `localhost` instead of this service. |
+| `PROTOCOL` | **Yes (prod)** | `http` | `https` in Cloud Run, `http` for local dev |
+| `PORT` | No | `8080` | Listening port |
 | `CLOUD_RUN_REGION` | No | `us-central1` | Region of the target Cloud Run service |
 | `CD_TARGET_SERVICE` | No | `dinoquest` | Default Cloud Run service name to deploy to |
 | `GITHUB_OWNER` | Yes | `weimeilin79` | GitHub repo owner (for PR comments + releases) |
@@ -244,6 +247,9 @@ SERVICE_NAME="dinoquest"
 GITHUB_OWNER="weimeilin79"
 GITHUB_REPO="https://github.com/weimeilin79/dinoquest-io"
 
+CD_AGENT_URL=$(gcloud run services describe cd-agent \
+  --region=us-central1 --format="value(status.url)" --project=$PROJECT_ID | sed 's|https://||')
+
 gcloud run deploy cd-agent \
   --image=$IMAGE \
   --region=us-central1 \
@@ -251,6 +257,7 @@ gcloud run deploy cd-agent \
   --memory=1Gi \
   --set-env-vars="GOOGLE_CLOUD_PROJECT=${PROJECT_ID}" \
   --set-env-vars="GOOGLE_GENAI_USE_VERTEXAI=True" \
+  --set-env-vars="HOST=${CD_AGENT_URL},PROTOCOL=https" \
   --set-env-vars="CD_TARGET_SERVICE=${SERVICE_NAME}" \
   --set-env-vars="HARNESS_EVENTS_TOPIC=${TOPIC}" \
   --set-env-vars="GITHUB_OWNER=${GITHUB_OWNER}" \

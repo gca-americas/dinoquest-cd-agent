@@ -1,10 +1,23 @@
 import json
 import logging
 import os
+import threading
 from datetime import datetime, timezone
 from typing import Any
 
 log = logging.getLogger(__name__)
+
+_publisher = None
+_publisher_lock = threading.Lock()
+
+
+def _get_publisher():
+    global _publisher
+    with _publisher_lock:
+        if _publisher is None:
+            from google.cloud import pubsub_v1
+            _publisher = pubsub_v1.PublisherClient()
+        return _publisher
 
 
 def resolve_secret(env_var: str, secret_env_var: str) -> str | None:
@@ -43,9 +56,7 @@ def emit_event(
         "correlation_id": correlation_id,
     }
     try:
-        from google.cloud import pubsub_v1
-        publisher = pubsub_v1.PublisherClient()
-        future = publisher.publish(topic, json.dumps(event).encode())
+        future = _get_publisher().publish(topic, json.dumps(event).encode())
         future.add_done_callback(
             lambda f: log.warning("emit_event failed (non-fatal): %s", f.exception())
             if f.exception() else None
