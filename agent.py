@@ -6,6 +6,7 @@ from pathlib import Path
 from google.adk.agents import LlmAgent
 from google.adk.skills import load_skill_from_dir
 from google.adk.tools import skill_toolset
+from google.genai import types
 
 from utils import emit_event
 
@@ -160,9 +161,16 @@ def build_agent() -> LlmAgent:
     skill = load_skill_from_dir(_SKILL_DIR)
     cd_toolset = skill_toolset.SkillToolset(skills=[skill])
 
+    _retry_config = types.GenerateContentConfig(
+        http_options=types.HttpOptions(
+            retry_options=types.HttpRetryOptions(initial_delay=1, attempts=5)
+        )
+    )
+
     return LlmAgent(
         name="cd_pipeline",
         model="gemini-2.5-flash",
+        generate_content_config=_retry_config,
         instruction=(
             "You are an autonomous canary deployment agent for DinoQuest. "
             "Follow the canary-deploy skill for every run. "
