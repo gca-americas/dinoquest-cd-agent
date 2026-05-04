@@ -102,7 +102,7 @@ gcloud pubsub topics add-iam-policy-binding harness-events \
 | `CLOUD_RUN_REGION` | No | `us-central1` | Region of the target Cloud Run service |
 | `CD_TARGET_SERVICE` | No | `dinoquest` | Default Cloud Run service name to deploy to |
 | `GITHUB_OWNER` | Yes | `weimeilin79` | GitHub repo owner (for PR comments + releases) |
-| `GITHUB_REPO` | Yes | `dinoquest-io` | GitHub repo name |
+| `GITHUB_REPO` | Yes | `dinoquest` | GitHub repo name |
 | `GITHUB_TOKEN` | Yes | — | GitHub PAT with `repo` scope — used to post PR comments and create releases |
 | `APP_ENV_VARS` | No | — | Comma-separated `KEY=VALUE` pairs injected into every deployed revision (e.g. `LEADERBOARD_ENABLED=true`) |
 | `APP_SECRET_ENV_VARS` | No | — | Comma-separated `KEY=secret_name:version` pairs mounted from Secret Manager (e.g. `GEMINI_API_KEY=gemini-api-key:1`) |
@@ -135,7 +135,7 @@ CLOUD_RUN_REGION=us-central1
 CD_TARGET_SERVICE=dinoquest
 PORT=8081
 GITHUB_OWNER=weimeilin79
-GITHUB_REPO=dinoquest-io
+GITHUB_REPO=dinoquest
 GITHUB_TOKEN=ghp_...
 APP_ENV_VARS=LEADERBOARD_ENABLED=true
 APP_SECRET_ENV_VARS=GEMINI_API_KEY=gemini-api-key:1
@@ -157,7 +157,7 @@ curl -s -X POST http://localhost:8081/slack \
 
 # With PR context — CDAgent posts comment on the PR after deploy
 curl -s -X POST http://localhost:8081/slack \
-  -d "text=deploy us-central1-docker.pkg.dev/PROJECT/dinoquest/app:SHA PR #22 https://github.com/weimeilin79/dinoquest-io/pull/22" \
+  -d "text=deploy us-central1-docker.pkg.dev/PROJECT/dinoquest/app:SHA PR #22 https://github.com/weimeilin79/dinoquest/pull/22" \
   -d "user_name=test" -d "user_id=test" -d "channel_id=test"
 ```
 
@@ -245,7 +245,7 @@ SA="cd-agent@${PROJECT_ID}.iam.gserviceaccount.com"
 TOPIC="projects/${PROJECT_ID}/topics/harness-events"
 SERVICE_NAME="dinoquest"
 GITHUB_OWNER="weimeilin79"
-GITHUB_REPO="https://github.com/weimeilin79/dinoquest-io"
+GITHUB_REPO="https://github.com/weimeilin79/dinoquest"
 
 CD_AGENT_URL=$(gcloud run services describe cd-agent \
   --region=us-central1 --format="value(status.url)" --project=$PROJECT_ID | sed 's|https://||')
