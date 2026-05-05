@@ -162,12 +162,15 @@ def shift_traffic(
         log.error("shift_traffic op failed: %s", e)
         return json.dumps({"error": str(e), "status": "failed"})
 
-    emit_event("CDAgent", "traffic_shifted", {
-        "service": service_name,
-        "revision": new_revision,
-        "percent": new_percent,
-        "stable_revision": stable_revision,
-    }, correlation_id)
+    try:
+        emit_event("CDAgent", "traffic_shifted", {
+            "service": service_name,
+            "revision": new_revision,
+            "percent": new_percent,
+            "stable_revision": stable_revision,
+        }, correlation_id)
+    except Exception as e:
+        log.warning("shift_traffic emit_event failed: %s", e)
 
     log.info("Traffic: %s → %d%% to %s", service_name, new_percent, new_revision)
     return json.dumps({"status": "traffic_shifted", "revision": new_revision, "percent": new_percent})
@@ -257,19 +260,26 @@ def read_deployment_patterns(project_id: str, feature_signature: str) -> str:
 
 def write_deployment_pattern(project_id: str, pattern: dict, correlation_id: str = "") -> str:
     """Persist a successful deployment pattern to Firestore for future fast-lane matching."""
-    db = firestore.Client(project=project_id)
-    pattern["timestamp"] = datetime.now(timezone.utc).isoformat()
     doc_id = pattern.get("feature_signature", "unknown").replace(" ", "_")
-    db.collection("cdagent_deployment_patterns").document(doc_id).set(pattern)
+    try:
+        db = firestore.Client(project=project_id)
+        pattern["timestamp"] = datetime.now(timezone.utc).isoformat()
+        db.collection("cdagent_deployment_patterns").document(doc_id).set(pattern)
+    except Exception as e:
+        log.warning("write_deployment_pattern Firestore write failed: %s", e)
+        return json.dumps({"status": "error", "document": doc_id, "error": str(e)})
 
-    emit_event("CDAgent", "memory_written", {
-        "collection": "cdagent_deployment_patterns",
-        "key": doc_id,
-        "summary": (
-            f"canary={pattern.get('optimal_canary_percent')}% "
-            f"promote_in={pattern.get('time_to_promote')}s"
-        ),
-    }, correlation_id)
+    try:
+        emit_event("CDAgent", "memory_written", {
+            "collection": "cdagent_deployment_patterns",
+            "key": doc_id,
+            "summary": (
+                f"canary={pattern.get('optimal_canary_percent')}% "
+                f"promote_in={pattern.get('time_to_promote')}s"
+            ),
+        }, correlation_id)
+    except Exception as e:
+        log.warning("write_deployment_pattern emit_event failed: %s", e)
 
     return json.dumps({"status": "written", "document": doc_id})
 
@@ -285,6 +295,8 @@ def post_github_pr_comment(owner: str, repo: str, pr_number: int, body: str, git
         headers={"Authorization": f"token {github_token}", "Accept": "application/vnd.github.v3+json"},
         timeout=30,
     )
+    if not resp.ok:
+        return json.dumps({"error": resp.text[:200], "http_status": resp.status_code})
     return json.dumps({"http_status": resp.status_code})
 
 
@@ -313,9 +325,13 @@ def create_github_release(
         headers={"Authorization": f"token {github_token}", "Accept": "application/vnd.github.v3+json"},
         timeout=30,
     )
-    data = resp.json()
     if not resp.ok:
-        return json.dumps({"error": data.get("message", resp.text), "http_status": resp.status_code})
+        try:
+            msg = resp.json().get("message", resp.text)
+        except Exception:
+            msg = resp.text[:200]
+        return json.dumps({"error": msg, "http_status": resp.status_code})
+    data = resp.json()
     return json.dumps({
         "http_status": resp.status_code,
         "release_url": data.get("html_url"),
