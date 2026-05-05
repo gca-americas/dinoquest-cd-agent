@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 import requests
 import google.auth
 import google.auth.transport.requests
-from google.api_core.exceptions import NotFound
+from google.api_core.exceptions import GoogleAPICallError, NotFound
 from google.cloud import firestore, monitoring_v3, run_v2
 
 from utils import emit_event
@@ -53,6 +53,9 @@ def get_stable_revision(project_id: str, service_name: str, region: str) -> str:
         svc = client.get_service(name=name)
     except NotFound:
         return json.dumps({"stable_revision": None, "stable_percent": 0, "new_service": True})
+    except GoogleAPICallError as e:
+        log.error("get_stable_revision failed for %s: %s", service_name, e)
+        return json.dumps({"error": str(e), "service": service_name})
     traffic = sorted(svc.traffic_statuses, key=lambda t: t.percent, reverse=True)
     if not traffic:
         return json.dumps({"stable_revision": None, "stable_percent": 0, "new_service": False})
@@ -90,6 +93,9 @@ def deploy_revision(project_id: str, service_name: str, region: str, image_uri: 
             traffic=[],
         )
         op = client.create_service(parent=parent, service=new_svc, service_id=service_name)
+    except GoogleAPICallError as e:
+        log.error("deploy_revision failed for %s: %s", service_name, e)
+        return json.dumps({"error": str(e), "status": "failed", "image": image_uri})
     try:
         result = op.result()
     except Exception as e:
