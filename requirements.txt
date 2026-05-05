@@ -1,6 +1,7 @@
-google-adk>=1.0.0
+google-adk>=1.32.0
 a2a-sdk>=0.3.4,<0.4.0
 uvicorn>=0.30.0
+gunicorn>=21.0.0
 starlette>=0.46.0
 google-cloud-run>=0.10.0
 google-cloud-monitoring>=2.0.0
