@@ -86,6 +86,8 @@ def deploy_revision(project_id: str, service_name: str, region: str, image_uri: 
             existing[e.name] = e
         svc.template.containers[0].image = image_uri
         svc.template.containers[0].env = list(existing.values())
+        # Force a new revision even when the image digest hasn't changed (e.g. :latest reused).
+        svc.template.labels["deploy-time"] = str(int(time.time()))
         svc.traffic = []
         op = client.update_service(service=svc)
     except NotFound:
