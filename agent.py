@@ -58,6 +58,9 @@ def build_agent() -> LlmAgent:
         """Get the revision currently serving the majority of traffic."""
         svc = service_name or default_service
         log.info("CD [step 1] get_stable_revision | service=%s", svc)
+        emit_event("CDAgent", "thinking",
+                   {"summary": f"Deploying new revision for {svc} — checking stable revision"},
+                   _cid_get())
         result = _get_stable_revision_impl(project_id, svc, region)
         log.info("CD [step 1] get_stable_revision done | %s", result[:200])
         return result
@@ -114,6 +117,9 @@ def build_agent() -> LlmAgent:
         Look for a pattern similar to feature_signature for fast-lane matching.
         """
         log.info("CD [memory] read_patterns | signature=%.100s", feature_signature)
+        emit_event("CDAgent", "thinking",
+                   {"summary": f"Memory: reading deployment patterns for {default_service}"},
+                   _cid_get())
         result = read_deployment_patterns(project_id, feature_signature)
         log.info("CD [memory] read_patterns done | %s", result[:200])
         return result
