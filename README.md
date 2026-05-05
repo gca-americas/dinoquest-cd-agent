@@ -276,6 +276,23 @@ gcloud run deploy cd-agent \
 Note: `--min-instances=1 --no-cpu-throttling` keeps the instance warm so Slack commands
 respond within the 3-second deadline.
 
+---
+
+## Cloud Run background thread behavior
+
+When CDAgent receives an A2A request from CIAgent, it immediately returns an
+acknowledgment and runs the full canary deployment in a background thread. This keeps
+the caller's HTTP connection short, but has an important Cloud Run implication:
+
+After the ACK is returned, Cloud Run has no active request. It can scale down the
+instance after the idle timeout (~15 min in practice). CDAgent's canary pipeline takes
+5–10 min. The `daemon=False` flag tells Python not to exit until the thread finishes,
+but Cloud Run sends SIGKILL regardless after the grace period. If you want a guarantee,
+set `min-instances=1` on both agents — that keeps the instance alive permanently. For a
+demo this is the right call anyway (no cold starts).
+
+The deploy command above already includes `--min-instances=1` for this reason.
+
 ### 4. Updating after code changes
 
 ```bash
