@@ -77,18 +77,22 @@ def deploy_revision(project_id: str, service_name: str, region: str, image_uri: 
     client = run_v2.ServicesClient()
     parent = f"projects/{project_id}/locations/{region}"
     name = f"{parent}/services/{service_name}"
-    container_env = _build_container_env()
+    new_env = _build_container_env()
     try:
         svc = client.get_service(name=name)
+        # Merge: keep all existing env vars, overlay with new ones (preserves secrets like GEMINI_API_KEY).
+        existing = {e.name: e for e in svc.template.containers[0].env}
+        for e in new_env:
+            existing[e.name] = e
         svc.template.containers[0].image = image_uri
-        svc.template.containers[0].env = container_env
+        svc.template.containers[0].env = list(existing.values())
         svc.traffic = []
         op = client.update_service(service=svc)
     except NotFound:
         log.info("Service %s not found — creating new service", service_name)
         new_svc = run_v2.Service(
             template=run_v2.RevisionTemplate(
-                containers=[run_v2.Container(image=image_uri, env=container_env)],
+                containers=[run_v2.Container(image=image_uri, env=new_env)],
             ),
             traffic=[],
         )
