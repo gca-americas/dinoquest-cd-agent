@@ -1,9 +1,12 @@
 import json
 import logging
 import os
+import ssl
+import threading
 import time
 from datetime import datetime, timezone
 
+import certifi
 import requests
 import google.auth
 import google.auth.transport.requests
@@ -15,6 +18,45 @@ from utils import emit_event
 GITHUB_API = "https://api.github.com"
 
 log = logging.getLogger(__name__)
+_http_lock = threading.Lock()  # serialize SSL handshakes — concurrent threads corrupt OpenSSL 3 error queue
+
+
+def _make_tls12_context() -> ssl.SSLContext:
+    """Force TLS 1.2 — Cloud Run egress proxy hangs Python 3.12 TLS 1.3 handshakes."""
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+    ctx.options |= ssl.OP_NO_TLSv1_3  # belt-and-suspenders: OpenSSL option level
+    ctx.load_verify_locations(certifi.where())
+    return ctx
+
+
+class _TLS12Adapter(requests.adapters.HTTPAdapter):
+    def init_poolmanager(self, *args, **kwargs):
+        kwargs["ssl_context"] = _make_tls12_context()
+        super().init_poolmanager(*args, **kwargs)
+
+
+def _http(method: str, url: str, **kwargs) -> requests.Response:
+    """HTTP call — forces TLS 1.2, new session per call, retries on connection errors."""
+    headers = kwargs.pop("headers", {})
+    headers["Connection"] = "close"
+    last_exc: Exception = RuntimeError("no attempts")
+    for attempt in range(5):
+        if attempt:
+            time.sleep(min(2 ** attempt, 30))
+        try:
+            with _http_lock:
+                with requests.Session() as session:
+                    adapter = _TLS12Adapter(pool_connections=1, pool_maxsize=1, max_retries=0)
+                    session.mount("https://", adapter)
+                    session.mount("http://", adapter)
+                    kwargs.setdefault("timeout", 15)
+                    return session.request(method, url, headers=headers, **kwargs)
+        except (requests.exceptions.SSLError, requests.exceptions.ConnectionError) as e:
+            log.warning("HTTP %s attempt %d failed: %s", method, attempt + 1, e)
+            last_exc = e
+    raise last_exc
 
 
 def _build_container_env() -> list:
@@ -103,7 +145,7 @@ def deploy_revision(project_id: str, service_name: str, region: str, image_uri: 
         log.error("deploy_revision failed for %s: %s", service_name, e)
         return json.dumps({"error": str(e), "status": "failed", "image": image_uri})
     try:
-        result = op.result()
+        result = op.result(timeout=300)
     except Exception as e:
         log.error("deploy_revision op failed: %s", e)
         return json.dumps({"error": str(e), "status": "failed", "image": image_uri})
@@ -114,11 +156,11 @@ def deploy_revision(project_id: str, service_name: str, region: str, image_uri: 
             f"https://run.googleapis.com/v1/projects/{project_id}"
             f"/locations/{region}/services/{service_name}:setIamPolicy"
         )
-        resp = requests.post(
+        resp = _http(
+            "POST",
             iam_url,
             json={"policy": {"bindings": [{"role": "roles/run.invoker", "members": ["allUsers"]}]}},
             headers={"Authorization": f"Bearer {creds.token}"},
-            timeout=30,
         )
         if resp.ok:
             log.info("Set allow-unauthenticated on service %s", service_name)
@@ -147,7 +189,11 @@ def shift_traffic(
     """
     client = run_v2.ServicesClient()
     name = f"projects/{project_id}/locations/{region}/services/{service_name}"
-    svc = client.get_service(name=name)
+    try:
+        svc = client.get_service(name=name)
+    except GoogleAPICallError as e:
+        log.error("shift_traffic get_service failed for %s: %s", service_name, e)
+        return json.dumps({"error": str(e), "status": "failed"})
 
     # Without a stable revision to absorb the remainder, a partial split is invalid.
     effective_percent = 100 if not stable_revision else new_percent
@@ -169,7 +215,7 @@ def shift_traffic(
     svc.traffic = traffic
     op = client.update_service(service=svc)
     try:
-        op.result()
+        op.result(timeout=300)
     except Exception as e:
         log.error("shift_traffic op failed: %s", e)
         return json.dumps({"error": str(e), "status": "failed"})
@@ -265,8 +311,12 @@ def read_deployment_patterns(project_id: str, feature_signature: str) -> str:
 
     Returns all records — the agent reasons about which (if any) match the current feature.
     """
-    db = firestore.Client(project=project_id)
-    patterns = [doc.to_dict() for doc in db.collection("cdagent_deployment_patterns").stream()]
+    try:
+        db = firestore.Client(project=project_id)
+        patterns = [doc.to_dict() for doc in db.collection("cdagent_deployment_patterns").stream()]
+    except Exception as e:
+        log.warning("read_deployment_patterns Firestore read failed: %s", e)
+        patterns = []
     return json.dumps({"patterns": patterns, "queried_signature": feature_signature})
 
 
@@ -301,11 +351,11 @@ def write_deployment_pattern(project_id: str, pattern: dict, correlation_id: str
 def post_github_pr_comment(owner: str, repo: str, pr_number: int, body: str, github_token: str) -> str:
     """Post a deployment status comment on a GitHub PR."""
     url = f"{GITHUB_API}/repos/{owner}/{repo}/issues/{pr_number}/comments"
-    resp = requests.post(
+    resp = _http(
+        "POST",
         url,
         json={"body": body},
         headers={"Authorization": f"token {github_token}", "Accept": "application/vnd.github.v3+json"},
-        timeout=30,
     )
     if not resp.ok:
         return json.dumps({"error": resp.text[:200], "http_status": resp.status_code})
@@ -324,7 +374,8 @@ def create_github_release(
 ) -> str:
     """Create a GitHub release (and tag) pointing at commit_sha."""
     url = f"{GITHUB_API}/repos/{owner}/{repo}/releases"
-    resp = requests.post(
+    resp = _http(
+        "POST",
         url,
         json={
             "tag_name": tag,
@@ -335,7 +386,6 @@ def create_github_release(
             "prerelease": prerelease,
         },
         headers={"Authorization": f"token {github_token}", "Accept": "application/vnd.github.v3+json"},
-        timeout=30,
     )
     if not resp.ok:
         try:
