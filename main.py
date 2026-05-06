@@ -16,9 +16,11 @@ import asyncio
 import json
 import logging
 import os
+import ssl
 import threading
 import uuid
 
+import certifi
 import requests
 import uvicorn
 from dotenv import load_dotenv
@@ -49,6 +51,21 @@ APP_NAME = "cd_pipeline"
 _USER_ID = "caller"
 
 _SLACK_WEBHOOK_URL: str = ""
+_slack_lock = threading.Lock()
+
+
+def _make_tls12_context() -> ssl.SSLContext:
+    ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    ctx.maximum_version = ssl.TLSVersion.TLSv1_2
+    ctx.load_verify_locations(certifi.where())
+    return ctx
+
+
+class _TLS12Adapter(requests.adapters.HTTPAdapter):
+    def init_poolmanager(self, *args, **kwargs):
+        kwargs["ssl_context"] = _make_tls12_context()
+        super().init_poolmanager(*args, **kwargs)
 
 
 def _resolve_slack_webhook() -> None:
@@ -63,10 +80,27 @@ def _resolve_slack_webhook() -> None:
 def _post_to_slack(text: str) -> None:
     if not _SLACK_WEBHOOK_URL:
         return
-    try:
-        requests.post(_SLACK_WEBHOOK_URL, json={"text": text}, timeout=10)
-    except Exception as e:
-        log.warning("Slack post-back failed: %s", e)
+    for attempt in range(3):
+        if attempt:
+            import time; time.sleep(2 ** attempt)
+        try:
+            with _slack_lock:
+                with requests.Session() as session:
+                    adapter = _TLS12Adapter(pool_connections=1, pool_maxsize=1, max_retries=0)
+                    session.mount("https://", adapter)
+                    resp = session.post(
+                        _SLACK_WEBHOOK_URL,
+                        json={"text": text},
+                        headers={"Connection": "close"},
+                        timeout=10,
+                    )
+                    if resp.status_code == 200:
+                        return
+                    log.warning("Slack post-back HTTP %s: %s", resp.status_code, resp.text[:100])
+                    return
+        except (requests.exceptions.SSLError, requests.exceptions.ConnectionError) as e:
+            log.warning("Slack post-back attempt %d failed: %s", attempt + 1, e)
+    log.warning("Slack post-back failed after 3 attempts")
 
 
 # ── Shared agent + session service (persistent across Slack/Chat messages) ────

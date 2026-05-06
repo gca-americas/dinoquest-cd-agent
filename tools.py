@@ -18,6 +18,7 @@ from utils import emit_event
 GITHUB_API = "https://api.github.com"
 
 log = logging.getLogger(__name__)
+_DEMO_MODE = os.environ.get("DEMO_MODE", "").lower() in ("1", "true", "yes")
 _http_lock = threading.Lock()  # serialize SSL handshakes — concurrent threads corrupt OpenSSL 3 error queue
 
 
@@ -26,7 +27,6 @@ def _make_tls12_context() -> ssl.SSLContext:
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.minimum_version = ssl.TLSVersion.TLSv1_2
     ctx.maximum_version = ssl.TLSVersion.TLSv1_2
-    ctx.options |= ssl.OP_NO_TLSv1_3  # belt-and-suspenders: OpenSSL option level
     ctx.load_verify_locations(certifi.where())
     return ctx
 
@@ -243,6 +243,19 @@ def poll_canary_metrics(
     stable_revision: str,
 ) -> str:
     """Poll Cloud Monitoring for error rate on canary vs stable over the last 30 seconds."""
+    if _DEMO_MODE:
+        log.info("[DEMO] Returning instant OK canary metrics | canary=%s", canary_revision)
+        return json.dumps({
+            "canary_revision": canary_revision,
+            "stable_revision": stable_revision,
+            "canary_requests": 42,
+            "stable_requests": 58,
+            "canary_error_rate": 0.0,
+            "stable_error_rate": 0.0,
+            "error_rate_ratio": None,
+            "window_seconds": 30,
+            "verdict": "OK",
+        })
     client = monitoring_v3.MetricServiceClient()
     window = 30
     now = time.time()
@@ -323,6 +336,20 @@ def read_deployment_patterns(project_id: str, feature_signature: str) -> str:
 def write_deployment_pattern(project_id: str, pattern: dict, correlation_id: str = "") -> str:
     """Persist a successful deployment pattern to Firestore for future fast-lane matching."""
     doc_id = pattern.get("feature_signature", "unknown").replace(" ", "_")
+    if _DEMO_MODE:
+        log.info("[DEMO] Skipping Firestore pattern write | doc=%s", doc_id)
+        try:
+            emit_event("CDAgent", "memory_written", {
+                "collection": "cdagent_deployment_patterns",
+                "key": doc_id,
+                "summary": (
+                    f"canary={pattern.get('optimal_canary_percent')}% "
+                    f"promote_in={pattern.get('time_to_promote')}s"
+                ),
+            }, correlation_id)
+        except Exception:
+            pass
+        return json.dumps({"status": "written", "document": doc_id})
     try:
         db = firestore.Client(project=project_id)
         pattern["timestamp"] = datetime.now(timezone.utc).isoformat()
@@ -373,6 +400,13 @@ def create_github_release(
     prerelease: bool = False,
 ) -> str:
     """Create a GitHub release (and tag) pointing at commit_sha."""
+    if _DEMO_MODE:
+        log.info("[DEMO] Skipping GitHub release creation | tag=%s", tag)
+        return json.dumps({
+            "http_status": 201,
+            "release_url": f"https://github.com/{owner}/{repo}/releases/tag/{tag}",
+            "tag": tag,
+        })
     url = f"{GITHUB_API}/repos/{owner}/{repo}/releases"
     resp = _http(
         "POST",

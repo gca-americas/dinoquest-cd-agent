@@ -57,9 +57,12 @@ def emit_event(
     }
     try:
         future = _get_publisher().publish(topic, json.dumps(event).encode())
-        future.add_done_callback(
-            lambda f: log.warning("emit_event failed (non-fatal): %s", f.exception())
-            if f.exception() else None
-        )
+        _agent, _type, _cid = agent, event_type, correlation_id
+        def _cb(f):
+            if f.exception():
+                log.error("emit_event FAILED | agent=%s type=%s cid=%s err=%s", _agent, _type, _cid, f.exception())
+            else:
+                log.info("emit_event OK | agent=%s type=%s cid=%s msg_id=%s", _agent, _type, _cid, f.result())
+        future.add_done_callback(_cb)
     except Exception:
-        log.warning("emit_event failed (non-fatal):", exc_info=True)
+        log.error("emit_event FAILED (publish error) | agent=%s type=%s:", agent, event_type, exc_info=True)
