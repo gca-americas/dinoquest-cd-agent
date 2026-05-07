@@ -79,7 +79,9 @@ def _resolve_slack_webhook() -> None:
 
 def _post_to_slack(text: str) -> None:
     if not _SLACK_WEBHOOK_URL:
+        log.warning("Slack post-back skipped — _SLACK_WEBHOOK_URL is empty")
         return
+    log.info("Slack post-back sending | text_len=%d preview=%.80s", len(text or ""), (text or "")[:80])
     for attempt in range(3):
         if attempt:
             import time; time.sleep(2 ** attempt)
@@ -95,6 +97,7 @@ def _post_to_slack(text: str) -> None:
                         timeout=10,
                     )
                     if resp.status_code == 200:
+                        log.info("Slack post-back OK")
                         return
                     log.warning("Slack post-back HTTP %s: %s", resp.status_code, resp.text[:100])
                     return
@@ -144,6 +147,7 @@ async def _run_agent(task_id: str, message: str, correlation_id: str) -> str:
 def _run_and_reply(task_id: str, message: str, correlation_id: str, reply_fn) -> None:
     try:
         result = asyncio.run(_run_agent(task_id, message, correlation_id))
+        log.info("Agent run complete [task=%s] result_len=%d preview=%.80s", task_id, len(result or ""), (result or "")[:80])
         reply_fn(result)
     except Exception as e:
         log.exception("Background agent run failed for task %s", task_id)
