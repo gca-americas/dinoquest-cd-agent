@@ -175,7 +175,7 @@ def build_agent() -> LlmAgent:
 
     return LlmAgent(
         name="cd_pipeline",
-        model="gemini-2.5-flash",
+        model="gemini-3-flash-preview",
         generate_content_config=_retry_config,
         instruction=(
             "You are an autonomous canary deployment agent for DinoQuest. "
