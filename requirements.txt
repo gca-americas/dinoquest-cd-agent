@@ -10,5 +10,6 @@ google-cloud-pubsub>=2.0.0
 google-cloud-secret-manager>=2.0.0
 google-auth>=2.0.0
 cryptography==47.0.0
+certifi>=2024.0.0
 requests>=2.32.0
 python-dotenv>=1.0.0
