@@ -293,6 +293,19 @@ demo this is the right call anyway (no cold starts).
 
 The deploy command above already includes `--min-instances=1` for this reason.
 
+### Background task timeout
+
+`_AGENT_TURN_TIMEOUT_S` in `main.py` caps how long a single CD run may take before
+`asyncio.wait_for` cancels it and a timeout notice is posted to Slack. Default:
+**900s (15 min)** — sized to cover a full canary deploy, traffic shifts, and the
+metric-polling window with margin.
+
+On timeout the user gets `"CD run timed out after 900s — see logs."` in Slack so a
+hung canary doesn't fail silently.
+
+Raise this if your canary window is longer (e.g. you extended `poll_canary_metrics`
+to monitor for >15 min). Lower it if you'd rather fail fast in a demo.
+
 ### 4. Updating after code changes
 
 ```bash

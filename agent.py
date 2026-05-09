@@ -1,6 +1,6 @@
 import logging
 import os
-import threading
+from contextvars import ContextVar
 from pathlib import Path
 
 from google.adk.agents import LlmAgent
@@ -10,13 +10,15 @@ from google.genai import types
 
 from utils import emit_event
 
-_cid = threading.local()
+# ContextVar (not threading.local) so per-request state stays isolated when
+# multiple requests run concurrently as asyncio tasks on the same event loop.
+_cid_var: ContextVar[str] = ContextVar("cd_cid", default="")
 
 def set_correlation_id(cid: str) -> None:
-    _cid.value = cid
+    _cid_var.set(cid)
 
 def _cid_get() -> str:
-    return getattr(_cid, "value", "")
+    return _cid_var.get()
 
 from tools import (
     create_github_release,

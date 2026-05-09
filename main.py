@@ -144,14 +144,41 @@ async def _run_agent(task_id: str, message: str, correlation_id: str) -> str:
     return final_response
 
 
-def _run_and_reply(task_id: str, message: str, correlation_id: str, reply_fn) -> None:
+# Background tasks run on uvicorn's long-lived event loop via asyncio.create_task
+# instead of `threading.Thread + asyncio.run`. The old pattern closed a fresh
+# loop per request, leaving module-level async clients bound to dead loops —
+# which surfaces as "Event loop is closed" on the next request.
+_BACKGROUND_TASKS: set[asyncio.Task] = set()
+
+
+def _schedule_background(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    _BACKGROUND_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_TASKS.discard)
+    return task
+
+
+# Hard ceiling on a single CD turn so that no failure mode (stuck LLM, stuck
+# tool, unreachable peer) can leave the task hanging indefinitely. A canary
+# deploy with monitoring can run for several minutes; pick a generous bound.
+_AGENT_TURN_TIMEOUT_S = 900
+
+
+async def _run_and_reply_async(task_id: str, message: str, correlation_id: str, reply_fn) -> None:
     try:
-        result = asyncio.run(_run_agent(task_id, message, correlation_id))
+        result = await asyncio.wait_for(
+            _run_agent(task_id, message, correlation_id),
+            timeout=_AGENT_TURN_TIMEOUT_S,
+        )
         log.info("Agent run complete [task=%s] result_len=%d preview=%.80s", task_id, len(result or ""), (result or "")[:80])
-        reply_fn(result)
+        # reply_fn uses requests.Session (sync); off-load so it doesn't block the loop.
+        await asyncio.to_thread(reply_fn, result)
+    except asyncio.TimeoutError:
+        log.warning("Agent run timed out after %ds [task=%s]", _AGENT_TURN_TIMEOUT_S, task_id)
+        await asyncio.to_thread(reply_fn, f"CD run timed out after {_AGENT_TURN_TIMEOUT_S}s — see logs.")
     except Exception as e:
         log.exception("Background agent run failed for task %s", task_id)
-        reply_fn(f"CD run failed: {e}")
+        await asyncio.to_thread(reply_fn, f"CD run failed: {e}")
 
 
 # ── Middleware: handle A2A task requests asynchronously ───────────────────────
@@ -177,11 +204,9 @@ class _A2AAsyncMiddleware(BaseHTTPMiddleware):
                 log.info("A2A task received | task_id=%s cid=%s | text=%.200s",
                          task_id, cid, text)
 
-                threading.Thread(
-                    target=_run_and_reply,
-                    args=(task_id, text, cid, _post_to_slack),
-                    daemon=False,
-                ).start()
+                _schedule_background(
+                    _run_and_reply_async(task_id, text, cid, _post_to_slack)
+                )
 
                 ack = json.dumps({
                     "jsonrpc": "2.0",
@@ -232,11 +257,9 @@ async def handle_slack(request: Request) -> Response:
     }, task_id)
     log.info("Slack message from %s: %.100s", user_name, text)
 
-    threading.Thread(
-        target=_run_and_reply,
-        args=(task_id, text, task_id, _post_to_slack),
-        daemon=False,
-    ).start()
+    _schedule_background(
+        _run_and_reply_async(task_id, text, task_id, _post_to_slack)
+    )
 
     return JSONResponse({
         "response_type": "in_channel",
@@ -276,11 +299,9 @@ async def handle_gchat(request: Request) -> Response:
     }, task_id)
     log.info("GChat message from %s: %.100s", user_name, text)
 
-    threading.Thread(
-        target=_run_and_reply,
-        args=(task_id, text, task_id, _post_to_slack),
-        daemon=False,
-    ).start()
+    _schedule_background(
+        _run_and_reply_async(task_id, text, task_id, _post_to_slack)
+    )
 
     return JSONResponse({"text": f"🚀 CDAgent on it: {text[:100]}"})
 
