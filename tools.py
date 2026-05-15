@@ -400,13 +400,6 @@ def create_github_release(
     prerelease: bool = False,
 ) -> str:
     """Create a GitHub release (and tag) pointing at commit_sha."""
-    if _DEMO_MODE:
-        log.info("[DEMO] Skipping GitHub release creation | tag=%s", tag)
-        return json.dumps({
-            "http_status": 201,
-            "release_url": f"https://github.com/{owner}/{repo}/releases/tag/{tag}",
-            "tag": tag,
-        })
     url = f"{GITHUB_API}/repos/{owner}/{repo}/releases"
     resp = _http(
         "POST",
